@@ -1,0 +1,245 @@
+import numpy as np
+import pandas as pd
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoModelForQuestionAnswering
+from transformers import pipeline
+from datasets import load_dataset
+from sklearn.metrics import precision_score, recall_score,  f1_score
+import time
+from datasets import load_dataset
+import random
+
+
+# Set random seed for reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+# Check if GPU is available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
+# Define the model for sentiment analysis (SST-2)
+MODEL_NAME_SENTIMENT = "distilbert-base-uncased-finetuned-sst-2-english"
+tokenizer_sentiment = AutoTokenizer.from_pretrained(MODEL_NAME_SENTIMENT)
+### YOUR CODE HERE ###
+model_sentiment = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME_SENTIMENT)
+model_sentiment = model_sentiment.to(device)
+print(f"Sentiment analysis model and tokenizer are ready.")
+
+def tokenize_sentiment_data(input_text, tokenizer, sequence_length=128):
+    ### YOUR CODE HERE ###
+    tokenized = tokenizer(
+        input_text,
+        max_length = sequence_length,
+        padding = True,
+        truncation = True,
+        return_tensors = "pt"
+        
+    )
+    inputs = {key:value.to(device) for key,value in tokenized.items()}
+    
+    return inputs
+
+def calculate_metrics(true_labels, predictions):
+    ### YOUR CODE HERE ###
+    precision = precision_score(true_labels,predictions)
+    recall = recall_score(true_labels,predictions)
+    return precision, recall
+
+
+def evaluate_sentiment(model, tokenizer, dataset):
+    model.eval()  # Set model to evaluation mode
+    correct = 0
+    total = 0
+    predictions = []
+    true_labels = []
+    
+    for item in dataset:
+        
+         ### YOUR CODE HERE ###
+        
+        # Tokenize the sentence
+        inputs = tokenize_sentiment_data(item['sentence'],tokenizer)
+        
+        # Get model predictions
+        outputs = model(**inputs)
+        prediction = outputs.logits.argmax(-1).item()
+        
+        # Collect predictions and true labels
+        predictions.append(prediction)
+        true_labels.append(item['label'])
+
+        if int(item['label']) == int(prediction):
+            correct += 1
+        total += 1
+    
+    
+    accuracy = correct/total
+    print(f"Accuracy:{accuracy*100:.2f}%")
+    
+    precision, recall = calculate_metrics(true_labels,predictions)
+    
+    return accuracy, precision, recall
+
+
+# Load the SST-2 dataset (sentiment analysis dataset from GLUE)
+sentiment_dataset = load_dataset("glue", "sst2", split="validation")
+
+# Sample a subset for faster evaluation 
+### YOUR CODE HERE ###
+sample_size = 500
+num_samples = min(sample_size, len(sentiment_dataset))
+sampled_indices = random.sample(range(len(sentiment_dataset)), num_samples)
+sentiment_dataset = sentiment_dataset.select(sampled_indices)
+print(len(sentiment_dataset))
+
+
+# Evaluate the model
+### YOUR CODE HERE ###
+accuracy, precision, recall = evaluate_sentiment(model_sentiment,tokenizer_sentiment,sentiment_dataset)
+
+print(f"Sentiment Analysis Accuracy: {accuracy:.2f}")
+print(f"Sentiment Analysis Precision: {precision:.2f}")
+print(f"Sentiment Analysis Recall: {recall:.2f}")
+
+
+# Define the model for question answering (SQuAD)
+MODEL_NAME_QNA = "distilbert-base-uncased-distilled-squad"
+
+### YOUR CODE HERE ###
+tokenizer_qna = AutoTokenizer.from_pretrained(MODEL_NAME_QNA)
+model_qna = AutoModelForQuestionAnswering.from_pretrained(MODEL_NAME_QNA)
+model_qna = model_qna.to(device)
+
+
+def evaluate_qna(model, tokenizer, dataset, device):
+    model.eval()
+    correct = 0
+    total = 0
+    exact_matches = []
+    f1_scores = []
+
+    for item in dataset:
+        question = item['question']
+        context = item['context']
+        answers = item['answers']  # usually {"text": ["Paris"], "answer_start": [23]}
+
+        # Tokenize question + context
+        tokenized = tokenizer(
+            question,
+            context,
+            padding="max_length",
+            truncation=True,
+            max_length=512,
+            return_tensors="pt"
+        )
+        inputs = {key: value.to(device) for key, value in tokenized.items()}
+
+        # Forward pass
+        outputs = model(**inputs)
+
+        # Predicted start and end indices
+        start_idx = outputs.start_logits.argmax(-1).item()
+        end_idx   = outputs.end_logits.argmax(-1).item()
+
+        # Decode predicted answer
+        predicted_answer = tokenizer.decode(
+            inputs["input_ids"][0][start_idx:end_idx+1],
+            skip_special_tokens=True
+        )
+
+        # True answer
+        true_answer = answers["text"][0]
+
+        # Exact match
+        exact_match = int(predicted_answer.strip().lower() == true_answer.strip().lower())
+        exact_matches.append(exact_match)
+
+        # F1 score (token overlap)
+        pred_tokens = predicted_answer.split()
+        true_tokens = true_answer.split()
+        common = set(pred_tokens) & set(true_tokens)
+        if len(common) == 0:
+            f1 = 0.0
+        else:
+            precision = len(common) / len(pred_tokens)
+            recall = len(common) / len(true_tokens)
+            f1 = 2 * precision * recall / (precision + recall)
+        f1_scores.append(f1)
+
+        if exact_match == 1:
+            correct += 1
+        total += 1
+
+    # Aggregate metrics
+    accuracy = correct / total
+    avg_f1 = sum(f1_scores) / total
+    avg_exact_match = sum(exact_matches) / total
+
+    return accuracy, avg_exact_match, avg_f1
+
+
+# Load the SQuAD dataset (question answering dataset)
+qna_dataset = load_dataset("squad", split="validation")
+
+# Sample a subset for faster evaluation 
+### YOUR CODE HERE ###
+sample_size = 100
+sampled_indices = random.sample(range(len(qna_dataset)),sample_size)
+qna_dataset = qna_dataset.select(sampled_indices)
+print(len(qna_dataset))
+
+
+# Example call
+qna_accuracy, qna_exact_match, qna_f1 = evaluate_qna(model_qna, tokenizer_qna, qna_dataset, device)
+
+print(f"Question Answering Accuracy: {qna_accuracy*100:.2f}%")
+print(f"Question Answering Exact Match: {qna_exact_match*100:.2f}%")
+print(f"Question Answering F1 Score: {qna_f1:.2f}")
+
+
+def run_all_benchmarks():
+    all_results = {}
+
+    # Evaluate Sentiment Analysis
+    print("\n=== Running Sentiment Analysis Benchmark ===")
+
+    ### YOUR CODE HERE ###
+    sentiment_accuracy, sentiment_precision, sentiment_recall = evaluate_sentiment(model_sentiment,tokenizer_sentiment,sentiment_dataset)
+    all_results["sentiment_analysis"] = {
+        "accuracy": sentiment_accuracy,
+        "precision": sentiment_precision,
+        "recall": sentiment_recall
+    }
+
+    # Evaluate Question Answering
+    print("\n=== Running Question Answering Benchmark ===")
+
+    ### YOUR CODE HERE ###
+    qna_accuracy, qna_exact_match, qna_f1 = evaluate_qna(model_qna,tokenizer_qna,qna_dataset,device)
+    
+    all_results["question_answering"] = {
+        "accuracy": qna_accuracy,
+        "exact_match": qna_exact_match,
+        "f1_score": qna_f1 
+    }
+
+    return all_results
+
+
+
+
+# Run all benchmarks
+### YOUR CODE HERE ###
+benchmark_results = run_all_benchmarks()
+
+# Print the results
+print("\nBenchmark Results:")
+print(benchmark_results)
+
+
